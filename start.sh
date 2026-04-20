@@ -4,8 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 VENV_DIR=".venv"
-HOST="${HOST:-0.0.0.0}"
+HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8001}"
+SKIP_INSTALL="${SKIP_INSTALL:-0}"
 
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment in $VENV_DIR..."
@@ -15,7 +16,16 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
-pip install --upgrade pip >/dev/null
-pip install -r requirements.txt
+if [ "$SKIP_INSTALL" != "1" ]; then
+    pip install --upgrade pip >/dev/null
+    pip install -r requirements.txt
+fi
+
+if [ ! -f .env ] && [ -z "${API_KEY:-}" ]; then
+    echo "No .env file and no API_KEY env var set."
+    echo "Run: python3 generate_api_key.py"
+    echo "Or:  cp .env.example .env && \$EDITOR .env"
+    exit 1
+fi
 
 exec uvicorn claude_proxy:app --host "$HOST" --port "$PORT" "$@"

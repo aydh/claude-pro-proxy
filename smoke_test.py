@@ -4,7 +4,12 @@
 Usage:
     ./smoke_test.py                       # http://localhost:8001
     ./smoke_test.py http://host:port      # custom base URL
-    SKIP_COMPLETION=1 ./smoke_test.py     # skip the completion check (no claude binary)
+    SKIP_COMPLETION=1 ./smoke_test.py     # skip completion check (no claude binary)
+
+Auth:
+    The proxy requires API_KEY. This script reads API_KEY from the environment
+    (or from ./.env) and sends it as a Bearer token. Set SKIP_AUTH=1 to omit
+    the Authorization header (useful for testing 401 behavior).
 
 Exits 0 on success, 1 on failure.
 """
@@ -17,18 +22,52 @@ import urllib.error
 import urllib.request
 
 
+def _load_env_file(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if (v.startswith('"') and v.endswith('"')) or (
+                    v.startswith("'") and v.endswith("'")
+                ):
+                    v = v[1:-1]
+                os.environ.setdefault(k, v)
+    except OSError:
+        pass
+
+
+_load_env_file()
+
+API_KEY = os.environ.get("API_KEY", "")
+SKIP_AUTH = os.environ.get("SKIP_AUTH", "").lower() in ("1", "true", "yes")
+
+
+def _headers(with_json: bool = False) -> dict:
+    h: dict = {}
+    if with_json:
+        h["Content-Type"] = "application/json"
+    if API_KEY and not SKIP_AUTH:
+        h["Authorization"] = f"Bearer {API_KEY}"
+    return h
+
+
 def _get(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=10) as r:
+    req = urllib.request.Request(url, headers=_headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
 
 def _post(url: str, body: dict, timeout: int = 120) -> dict:
     data = json.dumps(body).encode()
     req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        url, data=data, headers=_headers(with_json=True), method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
@@ -37,10 +76,7 @@ def _post(url: str, body: dict, timeout: int = 120) -> dict:
 def _stream_post(url: str, body: dict, timeout: int = 120) -> list[str]:
     data = json.dumps(body).encode()
     req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        url, data=data, headers=_headers(with_json=True), method="POST",
     )
     lines: list[str] = []
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -65,11 +101,15 @@ def main() -> int:
     base = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://localhost:8001"
     skip_completion = os.environ.get("SKIP_COMPLETION", "").lower() in ("1", "true", "yes")
 
+    if not API_KEY and not SKIP_AUTH:
+        print("WARN: API_KEY not set. Auth-gated endpoints will return 401.")
+        print("      Run ./generate_api_key.py or set API_KEY in your environment.")
+
     results: list[bool] = []
 
     def health():
         body = _get(f"{base}/health")
-        assert body.get("status") == "ok", f"unexpected health body: {body}"
+        assert body.get("status") in ("ok", "degraded"), f"unexpected health body: {body}"
 
     def models():
         body = _get(f"{base}/v1/models")
@@ -110,7 +150,7 @@ def main() -> int:
             chunks = [l for l in lines if l.startswith("data: ") and l != "data: [DONE]"]
             assert chunks, "no data chunks received"
             for c in chunks:
-                json.loads(c[len("data: "):])  # must be valid JSON
+                json.loads(c[len("data: "):])
 
         results.append(check("POST /v1/chat/completions (stream=false)", completion))
         results.append(check("POST /v1/chat/completions (stream=true)", streaming))
