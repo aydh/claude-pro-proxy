@@ -86,6 +86,20 @@ Environment variables:
 | `HOST` | `0.0.0.0` | Bind host for `start.sh` |
 | `PORT` | `8001` | Bind port for `start.sh` |
 
+## Smoke test
+
+With the proxy running, `./smoke_test.py` hits `/health`, `/v1/models`, and
+runs one streaming + one non-streaming completion. Uses only the Python
+stdlib, so no venv needed:
+
+```bash
+./smoke_test.py                           # default http://localhost:8001
+./smoke_test.py http://host:port          # custom URL
+SKIP_COMPLETION=1 ./smoke_test.py         # endpoints only, no claude binary
+```
+
+Exits 0 on success, 1 on failure.
+
 ## Limitations
 
 - `usage` token counts are always `0` — the CLI does not expose per-call counts.

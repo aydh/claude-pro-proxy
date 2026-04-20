@@ -62,9 +62,12 @@ directly — auth flows through the user's existing Claude Code login.
 PORT=9000 ./start.sh         # override port
 ```
 
-There is no test suite and no linter configured. When adding behavior, exercise
-it manually against `http://localhost:8001/v1/chat/completions` with both
-`stream: true` and `stream: false`, and with/without `tools`.
+`smoke_test.py` is a stdlib-only script that hits `/health`, `/v1/models`, and
+one streaming + one non-streaming completion against a running proxy. Run it
+after changes that touch request/response wiring. Use
+`SKIP_COMPLETION=1 ./smoke_test.py` to check just the HTTP surface when no
+`claude` binary is available. There is no unit test suite and no linter; for
+tool-calling or other deeper changes, exercise the endpoints manually.
 
 ## Conventions
 
