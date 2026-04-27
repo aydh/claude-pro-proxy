@@ -4,9 +4,16 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 VENV_DIR=".venv"
+SKIP_INSTALL="${SKIP_INSTALL:-0}"
+
+# Load .env so HOST/PORT and other vars are available to this script.
+if [ -f .env ]; then
+    # shellcheck disable=SC2046
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+fi
+
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8001}"
-SKIP_INSTALL="${SKIP_INSTALL:-0}"
 
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment in $VENV_DIR..."
@@ -28,4 +35,4 @@ if [ ! -f .env ] && [ -z "${API_KEY:-}" ]; then
     exit 1
 fi
 
-exec uvicorn claude_proxy:app --host "$HOST" --port "$PORT" "$@"
+exec uvicorn claude_proxy:app --host "$HOST" --port "$PORT" --reload "$@"
