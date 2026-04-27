@@ -83,6 +83,7 @@ SESSION_CACHE_SIZE: int = int(os.environ.get("SESSION_CACHE_SIZE", "256"))
 SESSION_CACHE_TTL_SECONDS: float = float(
     os.environ.get("SESSION_CACHE_TTL_SECONDS", "3600")
 )
+MAX_CONCURRENT_CLI: int = int(os.environ.get("MAX_CONCURRENT_CLI", "2"))
 
 _DEFAULT_MODELS: List[str] = [
     "claude-opus-4-7",
@@ -167,10 +168,11 @@ class Tool(BaseModel):
 
 class ChatRequest(BaseModel):
     model: str = DEFAULT_MODEL
-    messages: List[Dict[str, Any]]
+    messages: List[Dict[str, Any]] = Field(min_length=1)
     stream: bool = False
     tools: Optional[List[Tool]] = None
     tool_choice: Optional[Any] = None
+    user: Optional[str] = None
     # Accepted but ignored (Claude CLI controls these internally)
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -210,11 +212,25 @@ class _SessionCache:
 
 _session_cache = _SessionCache(SESSION_CACHE_SIZE, SESSION_CACHE_TTL_SECONDS)
 
+# Semaphore to cap concurrent Claude subprocesses. Lazy-initialised on first
+# use so it is created inside a running event loop.
+_cli_semaphore: Optional[asyncio.Semaphore] = None
 
-def _session_key(system_prompt: Optional[str]) -> Optional[str]:
+
+def _get_cli_semaphore() -> asyncio.Semaphore:
+    global _cli_semaphore
+    if _cli_semaphore is None:
+        _cli_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLI)
+    return _cli_semaphore
+
+
+def _session_key(system_prompt: Optional[str], user: Optional[str] = None) -> Optional[str]:
     if not system_prompt:
         return None
-    return hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+    # Include user identifier so different callers with the same system prompt
+    # don't share session state (conversation history bleed).
+    key_material = f"{user or ''}:{system_prompt}"
+    return hashlib.sha256(key_material.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -449,101 +465,103 @@ async def _run_claude(
     env["CLAUDE_BASH_NO_LOGIN"] = "1"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-
-    if proc.stdin is None or proc.stdout is None or proc.stderr is None:
-        raise RuntimeError("Failed to open subprocess pipes")
-
-    try:
-        proc.stdin.write(conversation.encode("utf-8"))
-        await proc.stdin.drain()
-    except (BrokenPipeError, ConnectionResetError):
-        pass
-    finally:
-        try:
-            proc.stdin.close()
-        except Exception:
-            pass
-
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + CLI_TIMEOUT_SECONDS
-    captured_session_id: Optional[str] = None
-
-    async def _terminate() -> None:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                proc.kill()
-
-    try:
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise asyncio.TimeoutError()
-            try:
-                raw_line = await asyncio.wait_for(
-                    proc.stdout.readline(), timeout=remaining
-                )
-            except asyncio.TimeoutError:
-                raise
-            if not raw_line:
-                break
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                if isinstance(event, dict):
-                    sid = event.get("session_id")
-                    if sid and isinstance(sid, str):
-                        captured_session_id = sid
-            except json.JSONDecodeError:
-                logger.debug("Non-JSON line from Claude: %s", line[:120])
-            yield line
-
-        try:
-            stderr_bytes = await asyncio.wait_for(
-                proc.stderr.read(), timeout=5
-            )
-        except asyncio.TimeoutError:
-            stderr_bytes = b""
-        if stderr_bytes:
-            logger.debug(
-                "Claude stderr: %s",
-                stderr_bytes.decode("utf-8", errors="replace")[:500],
-            )
-
-        await proc.wait()
-        if proc.returncode not in (0, None):
-            logger.warning("Claude exited with code %d", proc.returncode)
-            if cache_key:
-                _session_cache.invalidate(cache_key)
-        elif cache_key and captured_session_id:
-            _session_cache.put(cache_key, captured_session_id)
-
-    except asyncio.TimeoutError:
-        logger.error("Claude CLI timed out after %.0fs", CLI_TIMEOUT_SECONDS)
-        if cache_key:
-            _session_cache.invalidate(cache_key)
-        await _terminate()
-        raise OpenAIError(
-            f"Claude CLI timed out after {CLI_TIMEOUT_SECONDS:.0f}s",
-            status=504,
-            error_type="api_error",
+    async with _get_cli_semaphore():
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
-    except asyncio.CancelledError:
-        logger.info("Client disconnected - terminating Claude subprocess")
-        await _terminate()
-        raise
+        if proc.stdin is None or proc.stdout is None or proc.stderr is None:
+            raise RuntimeError("Failed to open subprocess pipes")
+
+        try:
+            proc.stdin.write(conversation.encode("utf-8"))
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CLI_TIMEOUT_SECONDS
+        captured_session_id: Optional[str] = None
+
+        async def _terminate() -> None:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    proc.kill()
+
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                try:
+                    raw_line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    raise
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    if isinstance(event, dict):
+                        sid = event.get("session_id")
+                        if sid and isinstance(sid, str):
+                            captured_session_id = sid
+                except json.JSONDecodeError:
+                    if LOG_PROMPTS:
+                        logger.debug("Non-JSON line from Claude: %s", line[:120])
+                yield line
+
+            try:
+                stderr_bytes = await asyncio.wait_for(
+                    proc.stderr.read(), timeout=5
+                )
+            except asyncio.TimeoutError:
+                stderr_bytes = b""
+            if stderr_bytes:
+                logger.debug(
+                    "Claude stderr: %s",
+                    stderr_bytes.decode("utf-8", errors="replace")[:500],
+                )
+
+            await proc.wait()
+            if proc.returncode not in (0, None):
+                logger.warning("Claude exited with code %d", proc.returncode)
+                if cache_key:
+                    _session_cache.invalidate(cache_key)
+            elif cache_key and captured_session_id:
+                _session_cache.put(cache_key, captured_session_id)
+
+        except asyncio.TimeoutError:
+            logger.error("Claude CLI timed out after %.0fs", CLI_TIMEOUT_SECONDS)
+            if cache_key:
+                _session_cache.invalidate(cache_key)
+            await _terminate()
+            raise OpenAIError(
+                f"Claude CLI timed out after {CLI_TIMEOUT_SECONDS:.0f}s",
+                status=504,
+                error_type="api_error",
+            )
+
+        except asyncio.CancelledError:
+            logger.info("Client disconnected - terminating Claude subprocess")
+            await _terminate()
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +870,7 @@ app = FastAPI(title="Claude Code Proxy", version="2.0.0")
 
 @app.middleware("http")
 async def _body_size_limit(request: Request, call_next):
+    # Fast-path: reject immediately if Content-Length header exceeds limit.
     length = request.headers.get("content-length")
     if length:
         try:
@@ -869,6 +888,24 @@ async def _body_size_limit(request: Request, call_next):
                 )
         except ValueError:
             pass
+
+    # Enforce the limit by reading the full body.
+    # Starlette's _CachedRequest.wrapped_receive replays request._body to
+    # downstream handlers automatically when body() is used (not stream()).
+    body = await request.body()
+    if len(body) > MAX_REQUEST_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": {
+                    "message": f"Request body exceeds {MAX_REQUEST_BYTES} bytes",
+                    "type": "invalid_request_error",
+                    "code": "request_too_large",
+                    "param": None,
+                }
+            },
+        )
+
     return await call_next(request)
 
 
@@ -910,22 +947,19 @@ async def chat_completions(
             code="model_not_found",
         )
 
-    conversation, system_prompt = build_prompt(request)
-    cid = _completion_id()
-    created = int(time.time())
-
+    # Resolve tool_choice BEFORE build_prompt so that tool_choice="none"
+    # suppresses tool spec injection into the system prompt.
     tool_choice = request.tool_choice
     if isinstance(tool_choice, str) and tool_choice == "none":
         has_tools = False
         request.tools = None
-        conversation_prompt = conversation
-        system_for_run = system_prompt
     else:
         has_tools = bool(request.tools)
-        conversation_prompt = conversation
-        system_for_run = system_prompt
 
-    cache_key = _session_key(system_for_run)
+    conversation, system_prompt = build_prompt(request)
+    cid = _completion_id()
+    created = int(time.time())
+    cache_key = _session_key(system_prompt, request.user)
 
     logger.info(
         "Request id=%s model=%s stream=%s tools=%d",
@@ -933,19 +967,22 @@ async def chat_completions(
     )
 
     if request.stream:
+        # Note: once StreamingResponse starts, the HTTP 200 header is already
+        # sent. Errors that occur during streaming are emitted as SSE payloads
+        # rather than HTTP error status codes.
         if has_tools:
             gen = _stream_with_tools(
-                conversation_prompt, system_for_run, model, cid, created, cache_key
+                conversation, system_prompt, model, cid, created, cache_key
             )
         else:
             gen = _stream_text_only(
-                conversation_prompt, system_for_run, model, cid, created, cache_key
+                conversation, system_prompt, model, cid, created, cache_key
             )
         return StreamingResponse(gen, media_type="text/event-stream")
 
     lines: List[str] = []
     async for line in _run_claude(
-        conversation_prompt, system_for_run, model,
+        conversation, system_prompt, model,
         streaming=False, has_tools=has_tools, cache_key=cache_key,
     ):
         lines.append(line)
