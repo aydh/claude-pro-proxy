@@ -35,4 +35,10 @@ if [ ! -f .env ] && [ -z "${API_KEY:-}" ]; then
     exit 1
 fi
 
-exec uvicorn claude_proxy:app --host "$HOST" --port "$PORT" --reload "$@"
+LOG_FILE="${LOG_FILE:-proxy.log}"
+
+nohup uvicorn claude_proxy:app --host "$HOST" --port "$PORT" --reload "$@" \
+    >> "$LOG_FILE" 2>&1 &
+PID=$!
+echo "Proxy started (PID $PID) on $HOST:$PORT — logs: $LOG_FILE"
+echo "$PID" > proxy.pid
