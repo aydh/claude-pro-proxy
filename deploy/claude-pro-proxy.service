@@ -1,0 +1,33 @@
+# Canonical systemd unit for the claude-pro-proxy on the Mac mini.
+#
+# This is the version-controlled reference for what lives at
+# /etc/systemd/system/claude-pro-proxy.service on the mini. It is NOT
+# installed automatically (that would broaden the runner's sudo scope to
+# write /etc/systemd/system and run daemon-reload). Install it by hand once.
+#
+# The listening port is NOT hardcoded here — it comes from the repo-managed
+# EnvironmentFile (deploy/claude-pro-proxy.env), which is rsynced to
+# /srv/claude-pro-proxy/deploy/ on every deploy. `Environment=PORT=8001` is
+# only a fallback if that file is missing. Change the port in
+# deploy/claude-pro-proxy.env, not here.
+#
+# Secrets are loaded from /etc/claude-pro-proxy/env (untracked, populated
+# once by hand).
+
+[Unit]
+Description=claude-pro-proxy FastAPI server
+After=network.target
+
+[Service]
+Type=simple
+User=andrewsaunders
+WorkingDirectory=/srv/claude-pro-proxy
+Environment=PORT=8001
+EnvironmentFile=-/etc/claude-pro-proxy/env
+EnvironmentFile=-/srv/claude-pro-proxy/deploy/claude-pro-proxy.env
+ExecStart=/srv/claude-pro-proxy/.venv/bin/uvicorn claude_proxy:app --host 0.0.0.0 --port ${PORT}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
