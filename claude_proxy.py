@@ -491,6 +491,8 @@ async def _run_claude(
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CLI_TIMEOUT_SECONDS
         captured_session_id: Optional[str] = None
+        result_text: Optional[str] = None
+        result_is_error = False
 
         async def _terminate() -> None:
             if proc.returncode is None:
@@ -522,6 +524,9 @@ async def _run_claude(
                         sid = event.get("session_id")
                         if sid and isinstance(sid, str):
                             captured_session_id = sid
+                        if event.get("type") == "result" and "result" in event:
+                            result_text = event["result"]
+                            result_is_error = bool(event.get("is_error"))
                 except json.JSONDecodeError:
                     if LOG_PROMPTS:
                         logger.debug("Non-JSON line from Claude: %s", line[:120])
@@ -533,19 +538,29 @@ async def _run_claude(
                 )
             except asyncio.TimeoutError:
                 stderr_bytes = b""
-            if stderr_bytes:
-                logger.debug(
-                    "Claude stderr: %s",
-                    stderr_bytes.decode("utf-8", errors="replace")[:500],
-                )
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
 
             await proc.wait()
             if proc.returncode not in (0, None):
-                logger.warning("Claude exited with code %d", proc.returncode)
+                # Surface the CLI's own error text on failure, regardless of
+                # LOG_PROMPTS. Claude reports API/auth failures (e.g. a revoked
+                # OAuth token) in the result event's `result` field rather than
+                # on stderr, so log both to keep failures legible in the journal
+                # without turning on full request/response body logging.
+                detail = result_text if result_is_error else None
+                logger.warning(
+                    "Claude exited with code %d%s%s",
+                    proc.returncode,
+                    f" - {detail[:500]}" if detail else "",
+                    f" - stderr: {stderr_text[:500]}" if stderr_text else "",
+                )
                 if cache_key:
                     _session_cache.invalidate(cache_key)
-            elif cache_key and captured_session_id:
-                _session_cache.put(cache_key, captured_session_id)
+            else:
+                if stderr_text:
+                    logger.debug("Claude stderr: %s", stderr_text[:500])
+                if cache_key and captured_session_id:
+                    _session_cache.put(cache_key, captured_session_id)
 
         except asyncio.TimeoutError:
             logger.error("Claude CLI timed out after %.0fs", CLI_TIMEOUT_SECONDS)
