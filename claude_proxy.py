@@ -121,10 +121,12 @@ logger = logging.getLogger("claude_proxy")
 def _sanitize_log(value: Any) -> str:
     """Neutralize newlines and other control characters in user-provided values
     before logging, so a crafted request body cannot forge or inject log lines
-    (CodeQL py/log-injection). Printable content is preserved; control chars are
-    rendered as their escaped repr (e.g. ``\\n``)."""
+    (CodeQL py/log-injection). Printable content and tabs are preserved; other
+    control characters are replaced with a space. The trailing ``str.replace``
+    calls on line breaks are what the CodeQL sanitizer recognizes."""
     text = value if isinstance(value, str) else str(value)
-    return "".join(ch if ch == "\t" or (ch.isprintable()) else repr(ch)[1:-1] for ch in text)
+    text = "".join(ch if ch.isprintable() or ch == "\t" else " " for ch in text)
+    return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
 
 
 # ---------------------------------------------------------------------------
