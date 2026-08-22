@@ -57,6 +57,8 @@ def _load_env_file(path: str = ".env") -> None:
                     v = v[1:-1]
                 os.environ.setdefault(k, v)
     except OSError:
+        # Best-effort .env loading: an unreadable file just means we fall
+        # back to the process environment / defaults.
         pass
 
 
@@ -496,11 +498,15 @@ async def _run_claude(
             proc.stdin.write(conversation.encode("utf-8"))
             await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError):
+            # Claude exited before consuming stdin; the exit code / stderr
+            # handled below is the authoritative signal, so ignore the pipe error.
             pass
         finally:
             try:
                 proc.stdin.close()
             except Exception:
+                # stdin may already be closed if the subprocess died; nothing
+                # actionable to do here.
                 pass
 
         loop = asyncio.get_running_loop()
@@ -917,6 +923,8 @@ async def _body_size_limit(request: Request, call_next):
                     },
                 )
         except ValueError:
+            # Malformed Content-Length header; fall through to the body-size
+            # check below, which enforces the limit authoritatively.
             pass
 
     # Enforce the limit by reading the full body.

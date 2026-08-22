@@ -40,6 +40,8 @@ def _load_env_file(path: str = ".env") -> None:
                     v = v[1:-1]
                 os.environ.setdefault(k, v)
     except OSError:
+        # Best-effort .env loading: an unreadable file just means we fall
+        # back to the process environment / defaults.
         pass
 
 
