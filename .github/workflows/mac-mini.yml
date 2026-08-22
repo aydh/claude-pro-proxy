@@ -11,6 +11,9 @@ on:
         default: deploy
         options: [deploy, restart, logs]
 
+permissions:
+  contents: read
+
 env:
   SERVE_DIR: /srv/claude-pro-proxy
   SERVICE: claude-pro-proxy.service

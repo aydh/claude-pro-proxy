@@ -118,6 +118,17 @@ logging.basicConfig(
 logger = logging.getLogger("claude_proxy")
 
 
+def _sanitize_log(value: Any) -> str:
+    """Neutralize newlines and other control characters in user-provided values
+    before logging, so a crafted request body cannot forge or inject log lines
+    (CodeQL py/log-injection). Printable content and tabs are preserved; other
+    control characters are replaced with a space. The trailing ``str.replace``
+    calls on line breaks are what the CodeQL sanitizer recognizes."""
+    text = value if isinstance(value, str) else str(value)
+    text = "".join(ch if ch.isprintable() or ch == "\t" else " " for ch in text)
+    return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+
 # ---------------------------------------------------------------------------
 # OpenAI-style errors
 # ---------------------------------------------------------------------------
@@ -393,9 +404,13 @@ def build_prompt(request: ChatRequest) -> Tuple[str, Optional[str]]:
         logger.debug(
             "system_prompt (%d chars):\n%s",
             len(system_prompt or ""),
-            system_prompt,
+            _sanitize_log(system_prompt or ""),
         )
-        logger.debug("conversation (%d chars):\n%s", len(conversation), conversation)
+        logger.debug(
+            "conversation (%d chars):\n%s",
+            len(conversation),
+            _sanitize_log(conversation),
+        )
     else:
         logger.debug(
             "prompt built: system=%d chars  conversation=%d chars",
@@ -455,7 +470,7 @@ async def _run_claude(
 
     logger.info(
         "Claude CLI: model=%s streaming=%s conv_chars=%d resume=%s",
-        model, streaming, len(conversation), bool(resume_id),
+        _sanitize_log(model), streaming, len(conversation), bool(resume_id),
     )
 
     env = os.environ.copy()
@@ -978,7 +993,7 @@ async def chat_completions(
 
     logger.info(
         "Request id=%s model=%s stream=%s tools=%d",
-        cid, model, request.stream, len(request.tools or []),
+        cid, _sanitize_log(model), request.stream, len(request.tools or []),
     )
 
     if request.stream:
