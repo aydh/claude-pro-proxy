@@ -118,6 +118,17 @@ logging.basicConfig(
 logger = logging.getLogger("claude_proxy")
 
 
+def _scrub_log(value: Any) -> str:
+    """Sanitize a value for safe inclusion in a log entry.
+
+    User-controlled strings can contain CR/LF, letting a caller forge extra
+    log lines (log injection). Strip line breaks and other control characters
+    so each logged value stays on a single line.
+    """
+    text = str(value)
+    return re.sub(r"[\r\n\x00-\x1f\x7f]", " ", text)
+
+
 # ---------------------------------------------------------------------------
 # OpenAI-style errors
 # ---------------------------------------------------------------------------
@@ -455,7 +466,7 @@ async def _run_claude(
 
     logger.info(
         "Claude CLI: model=%s streaming=%s conv_chars=%d resume=%s",
-        model, streaming, len(conversation), bool(resume_id),
+        _scrub_log(model), streaming, len(conversation), bool(resume_id),
     )
 
     env = os.environ.copy()
@@ -978,7 +989,7 @@ async def chat_completions(
 
     logger.info(
         "Request id=%s model=%s stream=%s tools=%d",
-        cid, model, request.stream, len(request.tools or []),
+        cid, _scrub_log(model), request.stream, len(request.tools or []),
     )
 
     if request.stream:
