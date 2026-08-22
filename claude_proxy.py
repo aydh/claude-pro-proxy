@@ -993,7 +993,8 @@ async def chat_completions(
 
     logger.info(
         "Request id=%s model=%s stream=%s tools=%d",
-        cid, _sanitize_log(model), request.stream, len(request.tools or []),
+        cid, _sanitize_log(model), _sanitize_log(request.stream),
+        len(request.tools or []),
     )
 
     if request.stream:
