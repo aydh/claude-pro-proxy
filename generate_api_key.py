@@ -66,6 +66,8 @@ def _write_env(path: str, lines: List[str], key_var: str, key_val: str) -> None:
     try:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
+        # Tightening permissions is best-effort (e.g. on filesystems that
+        # don't support chmod); the key was still written successfully.
         pass
 
 
